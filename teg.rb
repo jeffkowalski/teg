@@ -93,7 +93,6 @@ class Teg < Thor
         JSON.parse response
       end
       @logger.debug soe
-      data = []
       timestamp = Time.now.to_i
       data.push({ series: 'soe', values: { value: soe['percentage'].to_f }, timestamp: timestamp })
 
