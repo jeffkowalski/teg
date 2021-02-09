@@ -1,0 +1,19 @@
+teg - a service to record powerwall status to influxdb
+
+* Scan
+#+BEGIN_EXAMPLE
+Usage:
+  teg.rb record-status
+
+Options:
+      [--log], [--no-log]          # log output to ~/.log/.pvs.log
+                                   # Default: true
+  -v, [--verbose], [--no-verbose]  # increase verbosity
+
+Record current energy data to database
+#+END_EXAMPLE
+
+
+* See also
+[[https://github.com/jrester/tesla_powerwall][Python Tesla Powerwall API]]
+[[https://github.com/vloschiavo/powerwall2][Tesla Powerwall 2 - Local Gateway API documentation]]
