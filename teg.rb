@@ -79,7 +79,7 @@ class Teg < Thor
         response.cookie_jar
       end
 
-      meters = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
+      meters = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Unauthorized, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
         response = RestClient::Request.execute(method: :get, url: 'https://192.168.7.205/api/meters/aggregates', cookies: jar, verify_ssl: false)
         JSON.parse response
       end
