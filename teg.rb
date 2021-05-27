@@ -105,6 +105,14 @@ class Teg < Thor
         end
       end
 
+      operation = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Unauthorized, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
+        response = RestClient::Request.execute(method: :get, url: 'https://192.168.7.205/api/operation', cookies: jar, verify_ssl: false)
+        JSON.parse response
+      end
+      @logger.debug operation
+      timestamp = Time.now.to_i
+      data.push({ series: 'real_mode', values: { value: operation['real_mode'] }, timestamp: timestamp })
+
       soe = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
         response = RestClient::Request.execute(method: :get, url: 'https://192.168.7.205/api/system_status/soe', cookies: jar, verify_ssl: false)
         JSON.parse response
