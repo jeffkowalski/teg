@@ -14,6 +14,19 @@ Record current energy data to database
 #+END_EXAMPLE
 
 
+* Resolving Certificate Issues
+You may see an error such as
+#+begin_example
+ERROR -- : SSL_connect SYSCALL returned=5 errno=0 state=SSLv3/TLS write client hello (OpenSSL::SSL::SSLError)
+#+end_example
+
+Powerwall has a self-signed certificate which is not trusted by installed authorities, so it must be added.
+
+#+begin_src sh
+echo quit | openssl s_client -showcerts -servername teg -connect teg:443 > teg.crt
+sudo cp teg.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+#+end_src
 * See also
 [[https://github.com/jrester/tesla_powerwall][Python Tesla Powerwall API]]
 [[https://github.com/vloschiavo/powerwall2][Tesla Powerwall 2 - Local Gateway API documentation]]

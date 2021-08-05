@@ -75,12 +75,12 @@ class Teg < Thor
           password: credentials[:password],
           force_sm_off: false
         }
-        response = RestClient::Request.execute(method: :post, url: 'https://192.168.7.205/api/login/Basic', headers: headers, payload: payload.to_json, verify_ssl: false)
+        response = RestClient::Request.execute(method: :post, url: 'https://teg/api/login/Basic', headers: headers, payload: payload.to_json, verify_ssl: false)
         response.cookie_jar
       end
 
       meters = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Unauthorized, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
-        response = RestClient::Request.execute(method: :get, url: 'https://192.168.7.205/api/meters/aggregates', cookies: jar, verify_ssl: false)
+        response = RestClient::Request.execute(method: :get, url: 'https://teg/api/meters/aggregates', cookies: jar, verify_ssl: false)
         JSON.parse response
       end
       @logger.debug meters
@@ -106,7 +106,7 @@ class Teg < Thor
       end
 
       operation = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Unauthorized, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
-        response = RestClient::Request.execute(method: :get, url: 'https://192.168.7.205/api/operation', cookies: jar, verify_ssl: false)
+        response = RestClient::Request.execute(method: :get, url: 'https://teg/api/operation', cookies: jar, verify_ssl: false)
         JSON.parse response
       end
       @logger.debug operation
@@ -114,7 +114,7 @@ class Teg < Thor
       data.push({ series: 'real_mode', values: { value: operation['real_mode'] }, timestamp: timestamp })
 
       soe = with_rescue([RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Exceptions::OpenTimeout], @logger) do |_try|
-        response = RestClient::Request.execute(method: :get, url: 'https://192.168.7.205/api/system_status/soe', cookies: jar, verify_ssl: false)
+        response = RestClient::Request.execute(method: :get, url: 'https://teg/api/system_status/soe', cookies: jar, verify_ssl: false)
         JSON.parse response
       end
       @logger.debug soe
