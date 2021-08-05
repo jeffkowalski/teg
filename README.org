@@ -22,11 +22,24 @@ ERROR -- : SSL_connect SYSCALL returned=5 errno=0 state=SSLv3/TLS write client h
 
 Powerwall has a self-signed certificate which is not trusted by installed authorities, so it must be added.
 
+Extract the certificate
 #+begin_src sh
 echo quit | openssl s_client -showcerts -servername teg -connect teg:443 > teg.crt
+#+end_src
+
+Either install it at system level
+#+begin_src sh
 sudo cp teg.crt /usr/local/share/ca-certificates/
 sudo update-ca-certificates
 #+end_src
+
+or install per-user
+#+begin_src sh
+certutil -d sql:$HOME/.pki/nssdb -D -n teg.crt
+certutil -d sql:$HOME/.pki/nssdb -A -n teg.crt -t "TC,C,T" -i ./teg.crt
+certutil -d sql:$HOME/.pki/nssdb -L
+#+end_src
+
 * See also
 [[https://github.com/jrester/tesla_powerwall][Python Tesla Powerwall API]]
 [[https://github.com/vloschiavo/powerwall2][Tesla Powerwall 2 - Local Gateway API documentation]]
