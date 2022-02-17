@@ -1,12 +1,9 @@
 # frozen_string_literal: true
 
+gem 'botbase', git: 'https://github.com/jeffkowalski/botbase'
+
 source 'https://rubygems.org'
 
-gem 'influxdb'
+gem 'date'
+gem 'json'
 gem 'rest-client'
-gem 'thor'
-
-# for robe:
-gem 'method_source'
-gem 'pry'
-gem 'pry-doc'
