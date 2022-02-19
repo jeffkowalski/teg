@@ -13,7 +13,7 @@ class Teg < RecorderBotBase
 
       with_rescue([RestClient::Unauthorized], @logger) do |_try2|
         data = []
-        soft_faults = [RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Exceptions::OpenTimeout]
+        soft_faults = [Errno::EHOSTUNREACH, RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Exceptions::OpenTimeout]
         jar = with_rescue(soft_faults, @logger) do |_try|
           headers = {
             content_type: :json
