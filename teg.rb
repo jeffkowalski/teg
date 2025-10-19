@@ -5,72 +5,198 @@ require 'bundler/setup'
 Bundler.require(:default)
 
 class Teg < RecorderBotBase
+  desc 'refresh-access-token', 'refresh access token'
+  def refresh_access_token
+    @logger.info 'refreshing access token'
+    credentials = load_credentials('tesla')
+
+    uri = URI('https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token')
+    request = Net::HTTP::Post.new(uri)
+    request['Content-Type'] = 'application/x-www-form-urlencoded'
+    request.set_form_data(
+      'grant_type' => 'refresh_token',
+      'client_id' => credentials[:client_id],
+      'refresh_token' => credentials[:refresh_token]
+    )
+
+    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+      http.request(request)
+    end
+
+    @logger.debug response.read_body
+    json = JSON.parse(response.body)
+    credentials[:access_token] = json['access_token']
+    credentials[:refresh_token] = json['refresh_token']
+    store_credentials(credentials, 'tesla')
+  end
+
   no_commands do
     def main
-      credentials = load_credentials
+      # Load credentials from tesla.yaml (shared with tesla.rb)
+      credentials = load_credentials('tesla')
       influxdb = options[:dry_run] ? nil : (InfluxDB::Client.new 'teg')
 
-      with_rescue([RestClient::Unauthorized], @logger) do |_try2|
-        data = []
-        soft_faults = [Errno::EHOSTUNREACH, RestClient::BadGateway, RestClient::GatewayTimeout, RestClient::Exceptions::OpenTimeout]
-        jar = with_rescue(soft_faults, @logger) do |_try|
-          headers = {
-            content_type: :json
-          }
-          payload = {
-            username: 'customer',
-            email: credentials[:email],
-            password: credentials[:password],
-            force_sm_off: false
-          }
-          response = RestClient::Request.execute(method: :post, url: 'https://teg/api/login/Basic', headers: headers, payload: payload.to_json, verify_ssl: false)
-          response.cookie_jar
-        end
+      soft_faults = [Net::OpenTimeout, Errno::EHOSTUNREACH]
 
-        meters = with_rescue(soft_faults, @logger) do |_try|
-          response = RestClient::Request.execute(method: :get, url: 'https://teg/api/meters/aggregates', cookies: jar, verify_ssl: false)
-          JSON.parse response
-        end
-        @logger.debug meters
-        %w[site battery load solar].each do |device|
-          timestamp = meters[device]['last_communication_time'] # "2021-02-01T14:43:06.590679464-08:00"
-          timestamp = (DateTime.parse timestamp).to_time.to_i
-          [
-            'instant_power',           # 20
-            'instant_reactive_power',  # 88
-            'instant_apparent_power',  # 90.24411338142782
-            'frequency',               # 0
-            'energy_exported',         # 29.19518524360683
-            'energy_imported',         # 865.0427431281169
-            'instant_average_voltage', # 215.986735703839
-            'instant_total_current',   # 7.971
-            'i_a_current',             # 0
-            'i_b_current',             # 0
-            'i_c_current',             # 0
-            'timeout'                 # 1500000000
-          ].each do |measure|
-            data.push({ series: measure, values: { value: meters[device][measure].to_f }, tags: { device: device }, timestamp: timestamp })
+      with_rescue([StandardError], @logger, retries: 2) do |_try|
+        data = []
+
+        # Get list of energy sites
+        uri = URI('https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/products')
+        request = Net::HTTP::Get.new(uri)
+        request['Content-Type'] = 'application/json'
+        request['Authorization'] = "Bearer #{credentials[:access_token]}"
+
+        response = with_rescue(soft_faults, @logger) do |_try|
+          Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+            http.request(request)
           end
         end
 
-        operation = with_rescue(soft_faults, @logger) do |_try|
-          response = RestClient::Request.execute(method: :get, url: 'https://teg/api/operation', cookies: jar, verify_ssl: false)
-          JSON.parse response
-        end
-        @logger.debug operation
-        timestamp = Time.now.to_i
-        data.push({ series: 'real_mode', values: { value: operation['real_mode'] }, timestamp: timestamp })
+        @logger.debug response.read_body
+        json = JSON.parse(response.body)
 
-        soe = with_rescue(soft_faults, @logger) do |_try|
-          response = RestClient::Request.execute(method: :get, url: 'https://teg/api/system_status/soe', cookies: jar, verify_ssl: false)
-          JSON.parse response
+        if json['error']
+          @logger.warn "Error accessing Fleet API: #{json['error']}, refreshing token"
+          refresh_access_token
+          return
         end
-        @logger.debug soe
-        timestamp = Time.now.to_i
-        data.push({ series: 'soe', values: { value: soe['percentage'].to_f }, timestamp: timestamp })
+
+        # Find energy sites (not vehicles)
+        energy_sites = json['response'].select { |product| product['resource_type'] == 'battery' }
+
+        if energy_sites.empty?
+          @logger.error 'No energy sites found'
+          return
+        end
+
+        # Use the first energy site (or you could iterate through all)
+        site_id = energy_sites.first['energy_site_id']
+        @logger.info "Querying energy site #{site_id}"
+
+        # Get live status (equivalent to /api/meters/aggregates)
+        uri = URI("https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/#{site_id}/live_status")
+        request = Net::HTTP::Get.new(uri)
+        request['Content-Type'] = 'application/json'
+        request['Authorization'] = "Bearer #{credentials[:access_token]}"
+
+        response = with_rescue(soft_faults, @logger) do |_try|
+          Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+            http.request(request)
+          end
+        end
+
+        @logger.debug "Live status response: #{response.body}"
+        live_status_json = JSON.parse(response.body)
+        @logger.debug "Parsed JSON: #{live_status_json.inspect}"
+
+        live_status = live_status_json['response']
+
+        if live_status.nil?
+          @logger.error "Failed to get live status. Full response: #{live_status_json.inspect}"
+          return
+        end
+
+        # Parse timestamp from the response
+        timestamp = DateTime.parse(live_status['timestamp']).to_time.to_i
+
+        # Map Fleet API data to the same structure as before
+        # Fleet API provides: solar_power, battery_power, load_power, grid_power
+        meters_data = {
+          'site' => {
+            'instant_power' => live_status['grid_power'] || 0,
+            'last_communication_time' => live_status['timestamp']
+          },
+          'battery' => {
+            'instant_power' => live_status['battery_power'] || 0,
+            'last_communication_time' => live_status['timestamp']
+          },
+          'load' => {
+            'instant_power' => live_status['load_power'] || 0,
+            'last_communication_time' => live_status['timestamp']
+          },
+          'solar' => {
+            'instant_power' => live_status['solar_power'] || 0,
+            'last_communication_time' => live_status['timestamp']
+          }
+        }
+
+        # Record power data for each device
+        %w[site battery load solar].each do |device|
+          data.push({
+                      series: 'instant_power',
+                      values: { value: meters_data[device]['instant_power'].to_f },
+                      tags: { device: device },
+                      timestamp: timestamp
+                    })
+        end
+
+        # Get site info for operation mode and battery percentage
+        uri = URI("https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/#{site_id}/site_info")
+        request = Net::HTTP::Get.new(uri)
+        request['Content-Type'] = 'application/json'
+        request['Authorization'] = "Bearer #{credentials[:access_token]}"
+
+        response = with_rescue(soft_faults, @logger) do |_try|
+          Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+            http.request(request)
+          end
+        end
+
+        @logger.debug "Site info response: #{response.body}"
+        site_info = JSON.parse(response.body)['response']
+
+        if site_info
+          # Record operation mode (equivalent to /api/operation)
+          data.push({
+                      series: 'real_mode',
+                      values: { value: site_info['default_real_mode'] || 'unknown' },
+                      timestamp: timestamp
+                    })
+
+          # Record backup reserve percentage
+          if site_info['backup_reserve_percent']
+            data.push({
+                        series: 'backup_reserve',
+                        values: { value: site_info['backup_reserve_percent'].to_f },
+                        timestamp: timestamp
+                      })
+          end
+        end
+
+        # Record battery percentage (equivalent to /api/system_status/soe)
+        percentage_charged = live_status['percentage_charged']
+        if percentage_charged
+          data.push({
+                      series: 'soe',
+                      values: { value: percentage_charged.to_f },
+                      timestamp: timestamp
+                    })
+        end
+
+        # Additional useful data from Fleet API
+        if live_status['grid_status']
+          data.push({
+                      series: 'grid_status',
+                      values: { value: live_status['grid_status'] },
+                      timestamp: timestamp
+                    })
+        end
+
+        if live_status['island_status']
+          data.push({
+                      series: 'island_status',
+                      values: { value: live_status['island_status'] },
+                      timestamp: timestamp
+                    })
+        end
+
         pp data if @logger.level == Logger::DEBUG
         influxdb.write_points data unless options[:dry_run]
       end
+    rescue StandardError => e
+      @logger.error "Exception: #{e.inspect}"
+      @logger.error e.backtrace.join("\n")
     end
   end
 end
