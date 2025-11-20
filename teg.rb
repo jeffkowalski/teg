@@ -5,6 +5,9 @@ require 'bundler/setup'
 Bundler.require(:default)
 
 class Teg < RecorderBotBase
+  # Custom error for retryable API failures
+  class RetryableAPIError < StandardError; end
+
   desc 'refresh-access-token', 'refresh access token'
   def refresh_access_token
     @logger.info 'refreshing access token'
@@ -36,7 +39,7 @@ class Teg < RecorderBotBase
       credentials = load_credentials('tesla')
       influxdb = options[:dry_run] ? nil : (InfluxDB::Client.new 'teg')
 
-      soft_faults = [Net::OpenTimeout, Errno::EHOSTUNREACH]
+      soft_faults = [Net::OpenTimeout, Errno::EHOSTUNREACH, RetryableAPIError]
 
       with_rescue([StandardError], @logger, retries: 2) do |_try|
         data = []
@@ -75,27 +78,37 @@ class Teg < RecorderBotBase
         @logger.info "Querying energy site #{site_id}"
 
         # Get live status (equivalent to /api/meters/aggregates)
-        uri = URI("https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/#{site_id}/live_status")
-        request = Net::HTTP::Get.new(uri)
-        request['Content-Type'] = 'application/json'
-        request['Authorization'] = "Bearer #{credentials[:access_token]}"
+        live_status = with_rescue(soft_faults, @logger, retries: 2) do |_try|
+          uri = URI("https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/#{site_id}/live_status")
+          request = Net::HTTP::Get.new(uri)
+          request['Content-Type'] = 'application/json'
+          request['Authorization'] = "Bearer #{credentials[:access_token]}"
 
-        response = with_rescue(soft_faults, @logger) do |_try|
-          Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+          response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
             http.request(request)
           end
+
+          @logger.debug "Live status response: #{response.body}"
+          live_status_json = JSON.parse(response.body)
+          @logger.debug "Parsed JSON: #{live_status_json.inspect}"
+
+          # Check for retryable errors in the API response
+          if live_status_json['error']&.include?('DeadlineExceeded')
+            @logger.warn 'API returned DeadlineExceeded, retrying...'
+            raise RetryableAPIError, live_status_json['error']
+          end
+
+          result = live_status_json['response']
+
+          if result.nil?
+            @logger.error "Failed to get live status. Full response: #{live_status_json.inspect}"
+            return nil
+          end
+
+          result
         end
 
-        @logger.debug "Live status response: #{response.body}"
-        live_status_json = JSON.parse(response.body)
-        @logger.debug "Parsed JSON: #{live_status_json.inspect}"
-
-        live_status = live_status_json['response']
-
-        if live_status.nil?
-          @logger.error "Failed to get live status. Full response: #{live_status_json.inspect}"
-          return
-        end
+        return if live_status.nil?
 
         # Parse timestamp from the response
         timestamp = DateTime.parse(live_status['timestamp']).to_time.to_i
