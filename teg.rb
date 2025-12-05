@@ -13,24 +13,36 @@ class Teg < RecorderBotBase
     @logger.info 'refreshing access token'
     credentials = load_credentials('tesla')
 
-    uri = URI('https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token')
-    request = Net::HTTP::Post.new(uri)
-    request['Content-Type'] = 'application/x-www-form-urlencoded'
-    request.set_form_data(
-      'grant_type' => 'refresh_token',
-      'client_id' => credentials[:client_id],
-      'refresh_token' => credentials[:refresh_token]
-    )
+    soft_faults = [
+      Net::OpenTimeout,
+      Net::ReadTimeout,
+      Errno::EHOSTUNREACH,
+      Errno::ECONNREFUSED,
+      Errno::ECONNRESET,
+      Errno::ETIMEDOUT,
+      SocketError
+    ]
 
-    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
-      http.request(request)
+    with_rescue(soft_faults, @logger, retries: 3) do |_try|
+      uri = URI('https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token')
+      request = Net::HTTP::Post.new(uri)
+      request['Content-Type'] = 'application/x-www-form-urlencoded'
+      request.set_form_data(
+        'grant_type' => 'refresh_token',
+        'client_id' => credentials[:client_id],
+        'refresh_token' => credentials[:refresh_token]
+      )
+
+      response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+        http.request(request)
+      end
+
+      @logger.debug response.read_body
+      json = JSON.parse(response.body)
+      credentials[:access_token] = json['access_token']
+      credentials[:refresh_token] = json['refresh_token']
+      store_credentials(credentials, 'tesla')
     end
-
-    @logger.debug response.read_body
-    json = JSON.parse(response.body)
-    credentials[:access_token] = json['access_token']
-    credentials[:refresh_token] = json['refresh_token']
-    store_credentials(credentials, 'tesla')
   end
 
   no_commands do
@@ -39,7 +51,16 @@ class Teg < RecorderBotBase
       credentials = load_credentials('tesla')
       influxdb = options[:dry_run] ? nil : (InfluxDB::Client.new 'teg')
 
-      soft_faults = [Net::OpenTimeout, Errno::EHOSTUNREACH, RetryableAPIError]
+      soft_faults = [
+        Net::OpenTimeout,
+        Net::ReadTimeout,
+        Errno::EHOSTUNREACH,
+        Errno::ECONNREFUSED,
+        Errno::ECONNRESET,
+        Errno::ETIMEDOUT,
+        SocketError,
+        RetryableAPIError
+      ]
 
       with_rescue([StandardError], @logger, retries: 2) do |_try|
         data = []
@@ -93,16 +114,19 @@ class Teg < RecorderBotBase
           @logger.debug "Parsed JSON: #{live_status_json.inspect}"
 
           # Check for retryable errors in the API response
-          if live_status_json['error']&.include?('DeadlineExceeded')
-            @logger.warn 'API returned DeadlineExceeded, retrying...'
-            raise RetryableAPIError, live_status_json['error']
+          if live_status_json['error']
+            error_msg = live_status_json['error']
+            if error_msg.include?('DeadlineExceeded') || error_msg.include?('upstream internal error')
+              @logger.warn "API returned retryable error (#{error_msg}), retrying..."
+              raise RetryableAPIError, error_msg
+            end
           end
 
           result = live_status_json['response']
 
           if result.nil?
             @logger.error "Failed to get live status. Full response: #{live_status_json.inspect}"
-            return nil
+            raise RetryableAPIError, 'Received nil response from live_status API'
           end
 
           result
@@ -145,19 +169,30 @@ class Teg < RecorderBotBase
         end
 
         # Get site info for operation mode and battery percentage
-        uri = URI("https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/#{site_id}/site_info")
-        request = Net::HTTP::Get.new(uri)
-        request['Content-Type'] = 'application/json'
-        request['Authorization'] = "Bearer #{credentials[:access_token]}"
+        site_info = with_rescue(soft_faults, @logger, retries: 2) do |_try|
+          uri = URI("https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/#{site_id}/site_info")
+          request = Net::HTTP::Get.new(uri)
+          request['Content-Type'] = 'application/json'
+          request['Authorization'] = "Bearer #{credentials[:access_token]}"
 
-        response = with_rescue(soft_faults, @logger) do |_try|
-          Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+          response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
             http.request(request)
           end
-        end
 
-        @logger.debug "Site info response: #{response.body}"
-        site_info = JSON.parse(response.body)['response']
+          @logger.debug "Site info response: #{response.body}"
+          site_info_json = JSON.parse(response.body)
+
+          # Check for retryable errors in the API response
+          if site_info_json['error']
+            error_msg = site_info_json['error']
+            if error_msg.include?('DeadlineExceeded') || error_msg.include?('upstream internal error')
+              @logger.warn "Site info API returned retryable error (#{error_msg}), retrying..."
+              raise RetryableAPIError, error_msg
+            end
+          end
+
+          site_info_json['response']
+        end
 
         if site_info
           # Record operation mode (equivalent to /api/operation)
