@@ -116,7 +116,12 @@ class Teg < RecorderBotBase
           # Check for retryable errors in the API response
           if live_status_json['error']
             error_msg = live_status_json['error']
-            if error_msg.include?('DeadlineExceeded') || error_msg.include?('upstream internal error')
+            if error_msg.include?('token expired') || error_msg.include?('401')
+              @logger.warn "Error accessing Fleet API: #{error_msg}, refreshing token"
+              refresh_access_token
+              credentials = load_credentials('tesla')
+              raise RetryableAPIError, error_msg
+            elsif error_msg.include?('DeadlineExceeded') || error_msg.include?('upstream internal error')
               @logger.warn "API returned retryable error (#{error_msg}), retrying..."
               raise RetryableAPIError, error_msg
             end
@@ -185,7 +190,12 @@ class Teg < RecorderBotBase
           # Check for retryable errors in the API response
           if site_info_json['error']
             error_msg = site_info_json['error']
-            if error_msg.include?('DeadlineExceeded') || error_msg.include?('upstream internal error')
+            if error_msg.include?('token expired') || error_msg.include?('401')
+              @logger.warn "Error accessing Fleet API: #{error_msg}, refreshing token"
+              refresh_access_token
+              credentials = load_credentials('tesla')
+              raise RetryableAPIError, error_msg
+            elsif error_msg.include?('DeadlineExceeded') || error_msg.include?('upstream internal error')
               @logger.warn "Site info API returned retryable error (#{error_msg}), retrying..."
               raise RetryableAPIError, error_msg
             end
