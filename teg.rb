@@ -130,7 +130,7 @@ class Teg < RecorderBotBase
           result = live_status_json['response']
 
           if result.nil?
-            @logger.error "Failed to get live status. Full response: #{live_status_json.inspect}"
+            @logger.warn "Failed to get live status. Full response: #{live_status_json.inspect}"
             raise RetryableAPIError, 'Received nil response from live_status API'
           end
 
